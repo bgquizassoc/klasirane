@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="bg">
+<head>
+<meta charset="utf-8" />
+<title>Интерактивна таблица — Top N сум на най-добрите резултати</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:20px;background:#f7f8fb}
+  textarea{width:100%;height:100px;font-family:monospace}
+  table{border-collapse:collapse;width:100%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+  th,td{border:1px solid #e2e6ef;padding:6px 8px;text-align:right}
+  th{background:#f1f4fb;position:sticky;top:0;z-index:2}
+  th .col-controls{display:flex;gap:6px;align-items:center;justify-content:flex-end}
+  th .col-title{flex:1;text-align:left}
+  tr:nth-child(even) td{background:#fbfcff}
+  .controls{display:flex;gap:12px;align-items:center;margin:8px 0 14px}
+  .small{font-size:0.9rem;color:#444}
+  button{cursor:pointer}
+  .filter-select{min-width:140px}
+  .status{margin-top:8px;color:#333}
+</style>
+</head>
+<body>
+  <h2>Интерактивна таблица — сортиране, филтри и Top N суми</h2>
+
+  <div class="controls">
+    <label class="small">Постави CSV/TSV (копи от Excel):</label>
+    <button id="load-sample">Зареди пример</button>
+    <label class="small">Top N (по подразбиране 15):</label>
+    <input id="topN" type="number" value="15" min="1" max="20" style="width:60px" />
+    <button id="applyTopN">Пресметни</button>
+    <button id="clearFilters">Изчисти филтрите</button>
+  </div>
+
+  <textarea id="csvInput" placeholder="Постави CSV/TSV тук (или копи-пейст от Excel). Първият ред се счита за заглавия."></textarea>
+  <div style="margin:8px 0">
+    <button id="parseBtn">Зареди таблицата</button>
+  </div>
+
+  <div id="tableWrap"></div>
+
+  <div class="status" id="status"></div>
+
+<script>
+/* ------- Utilities ------- */
+function parseCSV(text){
+  // Поддържа TSV или CSV; откриваме delimiter по първи ред
+  const lines = text.replace(/\\r/g,'').split('\\n').filter(l=>l.trim()!=='');
+  if(lines.length===0) return {headers:[], rows:[]};
+  const delim = (lines[0].indexOf('\\t')>-1) ? '\\t' : ',';
+  const headers = lines[0].split(delim).map(h=>h.trim());
+  const rows = lines.slice(1).map(line=>{
+    const cols = line.split(delim);
+    // pad to headers length
+    while(cols.length < headers.length) cols.push('');
+    return cols.map(c=>c.trim());
+  });
+  return {headers, rows};
+}
+
+function isNumeric(n){ return n!=='' && !isNaN(parseFloat(n)); }
+function toNumber(n){ return isNumeric(n) ? parseFloat(n) : NaN; }
+
+/* ------- Main rendering and logic ------- */
+let current = {headers:[], rows:[]}; // rows: array of arrays
+let filters = {}; // headerIndex -> selectedValue or '' (all)
+let sortState = {col:-1, dir:'desc'}; // dir: 'desc' or 'asc'
+
+function renderTable(){
+  const wrap = document.getElementById('tableWrap');
+  wrap.innerHTML = '';
+  if(current.headers.length===0){ wrap.innerHTML='<p>Няма заредена таблица.</p>'; return; }
+
+  // We'll assume last column to display is computed TopN; but game columns are all columns (we'll compute from all numeric columns)
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const hdrRow = document.createElement('tr');
+
+  // Create header cells: for each current header create title + filter select + sort button
+  current.headers.forEach((h, idx)=>{
+    const th = document.createElement('th');
+
+    const titleDiv = document.createElement('div');
+    titleDiv.className = 'col-title';
+    titleDiv.textContent = h || `Col ${idx+1}`;
+    titleDiv.style.cursor = 'pointer';
+    titleDiv.title = 'Клик за сортиране (превключва desc/asc)';
+
+    titleDiv.addEventListener('click', ()=> {
+      // toggle sort
+      if(sortState.col === idx) sortState.dir = (sortState.dir === 'desc') ? 'asc' : 'desc';
+      else { sortState.col = idx; sortState.dir = 'desc'; }
+      renderTable(); // re-render
+    });
+
+    const controls = document.createElement('div');
+    controls.className = 'col-controls';
+
+    // Filter select (unique values)
+    const select = document.createElement('select');
+    select.className = 'filter-select';
+    const unique = Array.from(new Set(current.rows.map(r=> (r[idx]===undefined? '': r[idx]) )));
+    unique.sort((a,b)=> (''+a).localeCompare(''+b));
+    const allOpt = document.createElement('option'); allOpt.value=''; allOpt.textContent='(всички)'; select.appendChild(allOpt);
+    unique.forEach(v=>{
+      const opt = document.createElement('option'); opt.value = v; opt.textContent = v; select.appendChild(opt);
+    });
+    select.value = filters[idx] || '';
+    select.addEventListener('change', ()=> {
+      filters[idx] = select.value;
+      applyFiltersAndRender();
+    });
+
+    // Sort indicator
+    const sortBtn = document.createElement('button');
+    sortBtn.textContent = (sortState.col===idx) ? (sortState.dir==='desc' ? '↓' : '↑') : '⇅';
+    sortBtn.title = 'Сортирай (клик също хедър)';
+
+    sortBtn.addEventListener('click', ()=>{
+      if(sortState.col === idx) sortState.dir = (sortState.dir === 'desc') ? 'asc' : 'desc';
+      else { sortState.col = idx; sortState.dir = 'desc'; }
+      renderTable();
+    });
+
+    th.appendChild(titleDiv);
+    controls.appendChild(select);
+    controls.appendChild(sortBtn);
+    th.appendChild(controls);
+    hdrRow.appendChild(th);
+  });
+
+  // Add last header for TopN sum
+  const thSum = document.createElement('th');
+  thSum.innerHTML = '<div class="col-title">Top N SUM</div><div class="col-controls small"> (най-добри N от игрите)</div>';
+  hdrRow.appendChild(thSum);
+
+  thead.appendChild(hdrRow);
+  table.appendChild(thead);
+
+  // Prepare rows to display considering filters and sorting
+  let displayRows = current.rows.map((r, i)=>({r, idx:i}));
+
+  // Apply filters
+  Object.keys(filters).forEach(k=>{
+    const col = parseInt(k);
+    const val = filters[k];
+    if(val && val !== ''){
+      displayRows = displayRows.filter(obj => (obj.r[col] || '') === val);
+    }
+  });
+
+  // Sorting
+  if(sortState.col >= 0){
+    const c = sortState.col;
+    displayRows.sort((a,b)=>{
+      const va = a.r[c], vb = b.r[c];
+      const na = toNumber(va), nb = toNumber(vb);
+      if(isNumeric(va) && isNumeric(vb)){
+        return (sortState.dir==='desc') ? nb - na : na - nb;
+      } else {
+        // string compare
+        return (sortState.dir==='desc') ? (''+vb).localeCompare(''+va) : (''+va).localeCompare(''+vb);
+      }
+    });
+  }
+
+  // Create tbody
+  const tbody = document.createElement('tbody');
+
+  // Determine which columns are numeric game columns for TopN calculation:
+  // We'll treat all columns as potential game columns except the computed last column.
+  const topN = Math.max(1, Math.min(20, parseInt(document.getElementById('topN').value || '15')));
+
+  displayRows.forEach(obj=>{
+    const tr = document.createElement('tr');
+    const row = obj.r;
+    current.headers.forEach((h, idx)=>{
+      const td = document.createElement('td');
+      td.contentEditable = true; // allow quick edit
+      td.textContent = row[idx] || '';
+      // when editing, update current rows and recompute
+      td.addEventListener('input', ()=> {
+        current.rows[obj.idx][idx] = td.textContent.trim();
+        applyFiltersAndRender();
+      });
+      tr.appendChild(td);
+    });
+
+    // compute topN sum for this row
+    const nums = current.headers.map((_,i)=> toNumber(row[i])).filter(n=>!isNaN(n));
+    nums.sort((a,b)=>b-a);
+    const topSlice = nums.slice(0, topN);
+    const sum = topSlice.reduce((s,x)=>s+x,0);
+    const tdSum = document.createElement('td');
+    tdSum.textContent = Number.isFinite(sum) ? sum.toFixed(2).replace(/\\.00$/,'') : '';
+    tdSum.style.fontWeight = '600';
+    tr.appendChild(tdSum);
+
+    tbody.appendChild(tr);
+  });
+
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+
+  // status
+  const st = document.getElementById('status');
+  st.textContent = `Показани редове: ${displayRows.length}. Top N = ${topN}. (Редове: ${current.rows.length})`;
+}
+
+function applyFiltersAndRender(){
+  renderTable();
+}
+
+/* ------- Event bindings ------- */
+document.getElementById('parseBtn').addEventListener('click', ()=>{
+  const txt = document.getElementById('csvInput').value;
+  if(!txt.trim()){ alert('Постави CSV/TSV съдържание в полето.'); return; }
+  const parsed = parseCSV(txt);
+  current.headers = parsed.headers;
+  current.rows = parsed.rows;
+  filters = {};
+  sortState = {col:-1, dir:'desc'};
+  renderTable();
+});
+
+document.getElementById('applyTopN').addEventListener('click', ()=> applyFiltersAndRender());
+document.getElementById('clearFilters').addEventListener('click', ()=>{
+  filters = {};
+  renderTable();
+});
+
+document.getElementById('load-sample').addEventListener('click', ()=>{
+  // sample: first column is player names, then 16 game scores (we show 8 for brevity)
+  const sampleHeaders = ['Player','G1','G2','G3','G4','G5','G6','G7','G8','G9','G10'];
+  const sampleRows = [
+    ['Иван','10','9','8','6','7','0','10','9','8','5'],
+    ['Мария','9','10','7','8','10','9','9','8','7','10'],
+    ['Георги','8','','10','9','9','8','7','6','10','9'],
+    ['Петя','7','6','5','10','8','10','10','9','8','7'],
+  ];
+  const lines = [sampleHeaders.join(',')].concat(sampleRows.map(r=>r.join(','))).join('\\n');
+  document.getElementById('csvInput').value = lines;
+});
+
